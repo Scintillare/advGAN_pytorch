@@ -8,7 +8,7 @@ from models import MNIST_target_net
 if __name__ == "__main__":
     use_cuda=True
     image_nc=1
-    epochs = 60
+    epochs = 200
     batch_size = 128
     BOX_MIN = 0
     BOX_MAX = 1
@@ -33,4 +33,4 @@ if __name__ == "__main__":
                     BOX_MIN,
                     BOX_MAX)
 
-    advGAN.train(dataloader, epochs)
+    advGAN.train(dataloader, epochs, target=4)
