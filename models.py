@@ -35,28 +35,31 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         model = [
             #c8
-            nn.Conv2d(image_nc, 8, kernel_size=4, stride=2, padding=0, bias=True),
-            nn.LeakyReLU(0.2),
+            nn.Conv2d(image_nc, 8, kernel_size=4, stride=2, padding=(1, 1), bias=True),
+            nn.LeakyReLU(0.2, inplace=True),
             # c16
-            nn.Conv2d(8, 16, kernel_size=4, stride=2, padding=0, bias=True),
+            nn.Conv2d(8, 16, kernel_size=4, stride=2, padding=(1, 1), bias=False),
             nn.InstanceNorm2d(16),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
             # c32
-            nn.Conv2d(16, 32, kernel_size=4, stride=2, padding=0, bias=True),
+            nn.Conv2d(16, 32, kernel_size=4, stride=2, padding=(1, 1), bias=False),
             nn.InstanceNorm2d(32),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(32, 1, kernel_size=4, stride=2, padding=(1, 1), bias=True),
         ]
         self.model = nn.Sequential(*model)
         # self.fc = nn.Linear(32*35*35, 5)
-        self.fc = nn.Linear(32*128, model_num_classes)
+        # self.fc =  nn.Linear(32*128, model_num_classes) # BUG with batch size and output size
         self.prob = nn.Sigmoid()
 
     def forward(self, x):
-        output = self.model(x).squeeze()
-        output = output.view(-1)
-        logits = self.fc(output)
-        probs = self.prob(logits)
-        return logits, probs
+        output = self.model(x).squeeze() #128*32
+        # output = output.view(-1) # 4096
+        # logits = self.fc(output)
+        # logits = self.fc(output)
+        probs = self.prob(output)
+        return output, probs
 
 
 class Generator(nn.Module):
