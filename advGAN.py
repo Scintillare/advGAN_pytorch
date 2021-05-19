@@ -51,7 +51,8 @@ def adv_loss(probs_model, onehot_labels, is_targeted):
     zeros = torch.zeros_like(other)
     if is_targeted:
         loss_adv = torch.sum(torch.max(other - real, zeros))
-    loss_adv = torch.sum(torch.max(real - other, zeros))
+    else:
+        loss_adv = torch.sum(torch.max(real - other, zeros))
     return loss_adv
     # or maximize cross_entropy loss
     # loss_adv = -F.mse_loss(logits_model, onehot_labels)
@@ -64,7 +65,9 @@ class AdvGAN:
                  model_num_labels,
                  image_nc,
                  box_min,
-                 box_max):
+                 box_max,
+                 c_tresh=0.3,
+                 is_targeted=False):
         output_nc = image_nc
         self.device = device
         self.model_num_labels = model_num_labels
@@ -73,6 +76,8 @@ class AdvGAN:
         self.output_nc = output_nc
         self.box_min = box_min
         self.box_max = box_max
+        self.c_treshold = c_tresh 
+        self.is_targeted = is_targeted
         
         self.models_path = './models/'
         self.writer = SummaryWriter('./checkpoints/advganlogs/', max_queue=100)
@@ -84,8 +89,7 @@ class AdvGAN:
         self.netG_file_name = self.models_path + 'netG.pth.tar'
         self.netDisc_file_name = self.models_path + 'netD.pth.tar'
 
-        if not os.path.exists(self.models_path):
-            os.makedirs(self.models_path)
+        os.makedirs(self.models_path, exist_ok=True)
 
         # initialize all weights
         last_netG = find_last_checkpoint(self.netG_file_name)
@@ -94,11 +98,13 @@ class AdvGAN:
             self.netG.load_state_dict(torch.load(last_netG))
             self.netDisc.load_state_dict(torch.load(last_netDisc))
             *_, self.start_epoch = last_netG.split('.')
+            self.iteration = None
             self.start_epoch = int(self.start_epoch)+1
         else:
             self.netG.apply(weights_init)
             self.netDisc.apply(weights_init)
             self.start_epoch = 1
+            self.iteration = 0
 
        # initialize optimizers
         self.optimizer_G = torch.optim.Adam(self.netG.parameters(),
@@ -120,8 +126,7 @@ class AdvGAN:
         # optimize D
         for i in range(m):
             # add a clipping trick
-            tresh = 0.3 
-            perturbation = torch.clamp(self.netG(x), -tresh, tresh)
+            perturbation = torch.clamp(self.netG(x), -self.c_treshold, self.c_treshold)
             adv_images = perturbation + x
             adv_images = torch.clamp(adv_images, self.box_min, self.box_max)
             
@@ -152,17 +157,18 @@ class AdvGAN:
             loss_G_fake.backward(retain_graph=True)
 
             # calculate perturbation norm
-            C = tresh
             loss_perturb = torch.norm(perturbation.view(perturbation.shape[0], -1), 2, dim=1)
-            loss_perturb = torch.max(loss_perturb - C, torch.zeros(1, device=self.device))
+            loss_perturb = torch.max(loss_perturb - self.c_treshold, torch.zeros(1, device=self.device))
             loss_perturb = torch.mean(loss_perturb)
 
             # cal adv loss
-            f_real_logits = self.model(x)
-            f_real_probs = F.softmax(f_real_logits, dim=1)
-            f_fake_logits = self.model(adv_images)
+            # f_real_logits = self.model(x)
+            # f_real_probs = F.softmax(f_real_logits, dim=1)
+            f_fake_logits = self.model(adv_images) 
             f_fake_probs = F.softmax(f_fake_logits, dim=1)
-            fake_accuracy = torch.mean((torch.argmax(f_fake_logits, 1) == labels).float())
+            # if training is targeted, indicate how many examples classified as targets
+            # else show accuraccy on adversarial images
+            fake_accuracy = torch.mean((torch.argmax(f_fake_probs, 1) == labels).float())
             onehot_labels = torch.eye(self.model_num_labels, device=self.device)[labels.long()]
             loss_adv = adv_loss(f_fake_probs, onehot_labels, self.is_targeted)
 
@@ -172,13 +178,21 @@ class AdvGAN:
             loss_G = alambda*loss_adv + alpha*loss_G_fake + beta*loss_perturb
             loss_G.backward()
             self.optimizer_G.step()
+        
+        self.writer.add_scalar('iter/train/loss_D_real', loss_D_real.data, global_step=self.iteration)
+        self.writer.add_scalar('iter/train/loss_D_fake', loss_D_fake.data, global_step=self.iteration)
+        self.writer.add_scalar('iter/train/loss_G_fake', loss_G_fake.data, global_step=self.iteration)
+        self.writer.add_scalar('iter/train/loss_perturb', loss_perturb.data, global_step=self.iteration)
+        self.writer.add_scalar('iter/train/loss_adv', loss_adv.data, global_step=self.iteration)
+        self.writer.add_scalar('iter/train/loss_G', loss_G.data, global_step=self.iteration)
+        self.writer.add_scalar('iter/train/fake_acc', fake_accuracy.data, global_step=self.iteration)
+        self.iteration += 1
 
         return loss_D_GAN.item(), loss_G_fake.item(), loss_perturb.item(), loss_adv.item(), loss_G.item(), fake_accuracy
 
     def train(self, train_dataloader, epochs,  target=-1):
-        self.is_targeted = (True 
-                            if target in range(self.model_num_labels) 
-                            else False)
+        if self.iteration is None:
+            self.iteration = (self.start_epoch-1)*len(train_dataloader)+1
 
         for epoch in range(self.start_epoch, epochs+1):
             if epoch == 50:
@@ -219,20 +233,19 @@ class AdvGAN:
                 fake_acc_sum += fake_acc_batch
                 if i == len(train_dataloader)-2:
                     perturbation = self.netG(images)
-                    self.writer.add_images('train/adversarial_perturbation_1', perturbation, global_step=epoch)
-                    self.writer.add_images('train/adversarial_perturbation', 10*perturbation, global_step=epoch)
+                    self.writer.add_images('train/adversarial_perturbation', perturbation, global_step=epoch)
                     self.writer.add_images('train/adversarial_images', images+perturbation, global_step=epoch)
-                    self.writer.add_images('train/adversarial_images_cl2', torch.clamp(images+perturbation, 0, 1), global_step=epoch)
+                    self.writer.add_images('train/adversarial_images_cl', torch.clamp(images+perturbation, self.box_min, self.box_max), global_step=epoch)
 
 
             # print statistics
             num_batch = len(train_dataloader)
-            self.writer.add_scalar('train/loss_D', loss_D_sum/num_batch, global_step=epoch)
-            self.writer.add_scalar('train/loss_G_fake', loss_G_fake_sum/num_batch, global_step=epoch)
-            self.writer.add_scalar('train/loss_perturb', loss_perturb_sum/num_batch, global_step=epoch)
-            self.writer.add_scalar('train/loss_adv', loss_adv_sum/num_batch, global_step=epoch)
-            self.writer.add_scalar('train/loss_G', loss_G_sum/num_batch, global_step=epoch)
-            self.writer.add_scalar('train/fake_acc', fake_acc_sum/num_batch, global_step=epoch)
+            self.writer.add_scalar('epoch/train/loss_D', loss_D_sum/num_batch, global_step=epoch)
+            self.writer.add_scalar('epoch/train/loss_G_fake', loss_G_fake_sum/num_batch, global_step=epoch)
+            self.writer.add_scalar('epoch/train/loss_perturb', loss_perturb_sum/num_batch, global_step=epoch)
+            self.writer.add_scalar('epoch/train/loss_adv', loss_adv_sum/num_batch, global_step=epoch)
+            self.writer.add_scalar('epoch/train/loss_G', loss_G_sum/num_batch, global_step=epoch)
+            self.writer.add_scalar('epoch/train/fake_acc', fake_acc_sum/num_batch, global_step=epoch)
 
             print("epoch %d:\nloss_D: %.3f, loss_G_fake: %.3f,\
              \nloss_perturb: %.3f, loss_adv: %.3f, \n" %

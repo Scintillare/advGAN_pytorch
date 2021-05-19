@@ -33,4 +33,4 @@ if __name__ == "__main__":
                     BOX_MIN,
                     BOX_MAX)
 
-    advGAN.train(dataloader, epochs, target=4)
+    advGAN.train(dataloader, epochs)
